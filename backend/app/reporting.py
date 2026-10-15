@@ -92,7 +92,7 @@ def survey_summary(db: Session, survey_id: int) -> dict | None:
                 "responses_started": row.responses_started,
                 "responses_completed": row.responses_completed,
                 "completion_rate": (
-                    round(row.responses_completed / invitations, 4) if invitations else None
+                    row.responses_completed / invitations if invitations else None
                 ),
                 "median_duration_seconds": (
                     None

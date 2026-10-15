@@ -85,7 +85,7 @@ def test_summary_matches_independent_recomputation(survey_id):
         assert w["responses_started"] == e["started"]
         assert w["responses_completed"] == e["completed"]
         assert w["completion_rate"] == (
-            round(e["completed"] / invitations, 4) if invitations else None
+            e["completed"] / invitations if invitations else None
         )
         assert w["median_duration_seconds"] == (
             round(median(e["durations"]), 1) if e["durations"] else None
@@ -112,7 +112,7 @@ def test_rule_2_completion_rate_is_over_invitations_not_responses():
     total_completed = sum(w["responses_completed"] for w in weeks)
     # Weekly rates share one denominator, so they add up to the survey's rate.
     assert sum(w["completion_rate"] for w in weeks) == pytest.approx(
-        total_completed / 4200, abs=1e-3
+        total_completed / 4200
     )
 
 

@@ -5,3 +5,6 @@ th, td { border: 1px solid #8884; padding: 4px 10px; text-align: left; }
 button { cursor: pointer; }
 .layout { display: flex; gap: 32px; align-items: flex-start; }
 .error { color: #b00020; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.note { font-size: 0.875em; opacity: 0.75; max-width: 60ch; }
+button[aria-pressed="true"] { font-weight: bold; }
