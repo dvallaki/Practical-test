@@ -26,9 +26,33 @@ Two shared rules for all three functions:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
+from zoneinfo import ZoneInfo
 
 __all__ = ["parse_client_datetime", "normalise_email", "parse_duration_seconds"]
+
+# Every "no value here" marker that occurs in data/responses.csv, compared
+# after stripping and case-folding: '', 'N/A', 'n/a', 'NULL', 'null', '-',
+# 'none'. Whitespace-only counts as ''.
+_EMPTY_MARKERS = frozenset({"", "n/a", "null", "-", "none"})
+
+_CLIENT_TZ = ZoneInfo("Asia/Kolkata")
+_CLIENT_DATETIME_FORMAT = "%d/%m/%Y %H:%M:%S"
+
+# Pragmatic shape check, not RFC 5322: one '@', no whitespace, a dot in the
+# domain, no empty labels.
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s.]+(\.[^@\s.]+)+")
+
+# Optional sign, digits with optional comma thousands groups ("2,460"),
+# optional fractional part.
+_NUMBER_RE = re.compile(r"[+-]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?")
+
+
+def is_empty(raw: str | None) -> bool:
+    """True if `raw` is one of the export's ways of writing "no value"."""
+    return raw is None or raw.strip().casefold() in _EMPTY_MARKERS
 
 
 def parse_client_datetime(raw: str | None) -> datetime | None:
@@ -40,7 +64,12 @@ def parse_client_datetime(raw: str | None) -> datetime | None:
     The brief tells you the format the client writes and which local time it
     is in. Do not guess a different one.
     """
-    raise NotImplementedError
+    if is_empty(raw):
+        return None
+    # strptime raises ValueError for wrong shapes and impossible dates
+    # (29/02/2023, 31/04/2026, 25:00:00).
+    naive = datetime.strptime(raw.strip(), _CLIENT_DATETIME_FORMAT)
+    return naive.replace(tzinfo=_CLIENT_TZ)
 
 
 def normalise_email(raw: str | None) -> str | None:
@@ -53,7 +82,12 @@ def normalise_email(raw: str | None) -> str | None:
 
     You decide what "canonical" means here. Say why in your README.
     """
-    raise NotImplementedError
+    if is_empty(raw):
+        return None
+    email = raw.strip().lower()
+    if not _EMAIL_RE.fullmatch(email):
+        raise ValueError(f"not an email address: {raw!r}")
+    return email
 
 
 def parse_duration_seconds(raw: str | None) -> int | None:
@@ -65,4 +99,10 @@ def parse_duration_seconds(raw: str | None) -> int | None:
     Whether a particular number is a *plausible* duration is a business rule
     and belongs in your ingest, not in here.
     """
-    raise NotImplementedError
+    if is_empty(raw):
+        return None
+    text = raw.strip()
+    if not _NUMBER_RE.fullmatch(text):
+        raise ValueError(f"not a number: {raw!r}")
+    value = Decimal(text.replace(",", ""))
+    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
