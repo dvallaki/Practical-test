@@ -168,7 +168,12 @@ Correctness check: [backend/tests/test_summary.py](backend/tests/test_summary.py
 
 ## 6. The delete (Step 6a)
 
-TODO
+The two emails only conflict if the audit table holds the *responses themselves*. Compliance's rule is a legal requirement from the customer's legal team. It outranks a reconciliation process, and a later email from a different person doesn't override it. So:
+
+1. **Responses are hard-deleted**, in one transaction: the survey's `response` rows, then any `respondent` rows no other survey references (the email *is* the personal data), then the survey. Not a soft-delete flag: "gone permanently" means gone.
+2. **The audit keeps counts, not responses.** Before the delete, the same transaction writes a `survey_deletion_audit` row: survey id, name, client, invitations, who deleted it, when, and response counts by status and reporting week. That is exactly what year-end reconciliation needs. It holds no response ids, emails, names, ratings or free text. Note there is no audit table today; "the audit table" in the email needs defining.
+3. **Re-ingest must not resurrect it.** The client's CSV export will still contain the survey, so the ingest skips survey ids in the deletion audit and logs them to rejects.csv as `survey deleted`.
+4. **Before building, get both people to agree in writing** that an aggregate record satisfies the reporting manager and doesn't breach compliance. Also confirm with compliance what "permanently" means for database backups (usually: gone when the backup retention window expires) and for rejects.csv. Until they agree, the delete button doesn't ship.
 
 ## 7. AI log
 
