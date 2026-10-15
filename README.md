@@ -127,8 +127,9 @@ How it handles the rules:
 ### normalize.py decisions
 
 - **Empty markers**, shared by all three functions and found by reading the file: `''` / whitespace, `N/A`, `n/a`, `NULL`, `null`, `-`, `none`, compared case-insensitively.
-- **`parse_client_datetime`** accepts exactly `%d/%m/%Y %H:%M:%S` and attaches `Asia/Kolkata`. Impossible dates (`29/02/2023`) raise `ValueError`. No guessing other formats, and no month/day swapping.
+- **`parse_client_datetime`** accepts exactly `%d/%m/%Y %H:%M:%S` and attaches `Asia/Kolkata`. Impossible dates (`29/02/2023`), other formats (ISO, date-only, an explicit offset) and non-ASCII digits raise `ValueError`. No guessing, and no month/day swapping.
 - **`normalise_email`**: canonical = `strip()` + lower-case the whole address, then a shape check (one `@`, no whitespace, dotted domain). Lower-casing the local part is technically not RFC-safe, but no real mail provider treats case as significant, and the data shows the same person in different cases across the three systems (`Priya.Sharma22@` vs `priya.sharma22@`). I deliberately *don't* strip dots or `+tags`. That's Gmail-specific and would merge distinct people on other domains.
+- **Tests:** [backend/tests/test_normalize.py](backend/tests/test_normalize.py) runs the cases above, plus every distinct value of each column in `responses.csv` through its parser. The only failure mode is `ValueError`, and the only values that fail are the known bad rows.
 - **`parse_duration_seconds`** accepts integers, thousands separators (`2,460` → 2460; the row's timestamps are 41 minutes apart, confirming it), and decimals (rounded half-up). It returns negatives as-is: `-2400` *is* a number. Rejecting it is a business rule, so the ingest does it.
 
 ## 4. What I found wrong in the brief

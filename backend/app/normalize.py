@@ -47,7 +47,8 @@ _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s.]+(\.[^@\s.]+)+")
 
 # Optional sign, digits with optional comma thousands groups ("2,460"),
 # optional fractional part.
-_NUMBER_RE = re.compile(r"[+-]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?")
+# ASCII digits only: \d would also accept e.g. Arabic-Indic digits.
+_NUMBER_RE = re.compile(r"[+-]?([0-9]{1,3}(,[0-9]{3})+|[0-9]+)(\.[0-9]+)?")
 
 
 def is_empty(raw: str | None) -> bool:
@@ -68,7 +69,10 @@ def parse_client_datetime(raw: str | None) -> datetime | None:
         return None
     # strptime raises ValueError for wrong shapes and impossible dates
     # (29/02/2023, 31/04/2026, 25:00:00).
-    naive = datetime.strptime(raw.strip(), _CLIENT_DATETIME_FORMAT)
+    text = raw.strip()
+    if not text.isascii():  # strptime's %d etc. accept non-ASCII digits
+        raise ValueError(f"not a client timestamp: {raw!r}")
+    naive = datetime.strptime(text, _CLIENT_DATETIME_FORMAT)
     return naive.replace(tzinfo=_CLIENT_TZ)
 
 
