@@ -138,11 +138,33 @@ How it handles the rules:
 - **"A respondent counts only once per survey" doesn't say which attempt counts.** 578 people have 2–3 different attempts at the same survey. I count the most-progressed, then latest, and keep the rest, so the rule is one `UPDATE` to change.
 - **Future dates aren't covered by the rules.** I reject `started_at` / `completed_at` later than the time of the run (`31/12/2027`).
 - **`partial` responses all have a `completed_at`.** That's odd for something not completed, but consistent across ~11k rows, so I load it as-is.
-- **Survey 9 "Pilot - Do Not Report"** (client "Internal", 0 invitations, no responses) is loaded, because the export lists it. Whether it should appear in the list at all is a question for Step 4/5; completion rate over 0 invitations must be `null`, not a divide-by-zero.
+- **"responses_started" contradicts rule 3.** The rule says the response count is completed + partial, and that `started` and `abandoned` count in neither. So a field called `responses_started` must *exclude* responses whose status is `started`. I followed the rule, not the name: `responses_started` = completed + partial. The name should be `responses_received` or similar. **Question for the client.**
+- **Weekly completion rate over *total* invitations.** Invitations aren't dated, so each week's rate is that week's completions over the whole survey's invitations. The weekly numbers are small (survey 8: 0.7%, 2.1%…) and they *add up* to the survey's overall rate instead of averaging to it. That's what the rule says, so I implemented it, but it's worth confirming it's what they expect to see per week.
+- **Which date puts a response in a week isn't stated.** I use `started_at`, so a response and its completion stay in one row. The alternative (count completions in the week they completed) differs for only 23 of 16,175 counted completed responses, the ones that cross a Friday→Saturday midnight.
+- **"Saturday to Friday" in which clock?** In the client's local time (`client.timezone`). Doing it in UTC would move 8,642 responses (23%) to a different weekday, so the numbers wouldn't tie out with their other reports.
+- **Median duration of which responses?** Not specified. I use completed responses only ("how long does it take to do the survey"). Partials would drag it down with half-finished sessions. `null` in a week with no completions.
+- **Empty weeks.** Weeks between a survey's first and last response with no responses come back as zero rows, not missing, so the table doesn't silently skip a week.
+- **"Under 300 ms" doesn't say measured where, or at what percentile.** I measured server-side over HTTP and report p95 and max (section 5).
+- **Survey 9 "Pilot - Do Not Report"** (client "Internal", 0 invitations, no responses) is loaded, because the export lists it. Whether it should appear in the list at all is a question for the client. I kept it in the list, since "Do Not Report" arguably still means "show that it exists". Its summary returns `weeks: []`, and completion rate over 0 invitations is `null`, not a divide-by-zero.
 
 ## 5. Performance
 
-TODO
+**Every request under 300 ms. Slowest of 600 was 166 ms; p95 72 ms.**
+
+Measured with the full dataset loaded (37,997 responses), over real HTTP against the running uvicorn server (`--reload`, one worker), from inside the backend container. Each of the 12 surveys was requested 50 times after a restart; timings are wall-clock per request with `httpx` and `time.perf_counter()`:
+
+| | p50 | p95 | max |
+|---|---|---|---|
+| all 600 requests | 35 ms | 72 ms | 166 ms |
+| survey 5 (largest, 11,710 counted rows) | 70 ms | 152 ms | 166 ms |
+| survey 9 (no responses: the fixed overhead) | 23 ms | 49 ms | 76 ms |
+| first request after restart (survey 5) | 126 ms | | |
+
+This laptop was also running another project's PHP/MySQL stack during the run, so these numbers are pessimistic.
+
+Why it's fast: one SQL statement per request, aggregated in Postgres. `EXPLAIN (ANALYZE, BUFFERS)` for survey 5 shows an **Index Only Scan on `ix_response_summary`, Heap Fetches: 0**, 87 buffers, ~24 ms. That depends on the ingest running `VACUUM ANALYZE` at the end, so the visibility map is current. Without it, Postgres has to visit the table for every row.
+
+Correctness check: [backend/tests/test_summary.py](backend/tests/test_summary.py) recomputes every survey's weekly numbers in Python from the raw counted rows, using an independent week rule (`zoneinfo` + `date.weekday()`), and compares them field by field with the endpoint. It also tests each client rule separately (Saturday starts and contiguous weeks, the rate denominator, partial vs completed), plus survey 9 and a 404 for an unknown survey.
 
 ## 6. The delete (Step 6a)
 

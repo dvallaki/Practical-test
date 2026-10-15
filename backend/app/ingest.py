@@ -39,7 +39,7 @@ from sqlalchemy import select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from .db import SessionLocal
+from .db import SessionLocal, engine
 from .models import CHANNELS, RESPONSE_STATUSES, Client, Survey, create_all
 from .normalize import is_empty, normalise_email, parse_client_datetime, parse_duration_seconds
 
@@ -439,6 +439,11 @@ def run() -> int:
             text("SELECT count(*), count(*) FILTER (WHERE is_counted) FROM response")
         ).one()
     rejects.write(REJECTS_CSV)
+    # Fresh statistics for the planner, and a current visibility map so the
+    # summary query can use ix_response_summary as an index-only scan.
+    # VACUUM can't run inside a transaction, hence AUTOCOMMIT.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text("VACUUM ANALYZE"))
 
     reasons = Counter(
         reason for r in rejects.rows for reason in r["reason"].split("; ")

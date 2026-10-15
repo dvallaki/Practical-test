@@ -4,11 +4,12 @@ FastAPI app. The wiring, CORS and the health check are done for you.
 Add your endpoints here or in a router you import - your call.
 """
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from . import reporting
 from .db import get_session
 
 app = FastAPI(title="Survey Reporting Slice")
@@ -30,11 +31,14 @@ def health(db: Session = Depends(get_session)):
 
 @app.get("/api/surveys")
 def list_surveys(db: Session = Depends(get_session)):
-    """TODO: return the surveys. The front end already calls this."""
-    return []
+    """Every survey, including ones with no responses (the page must survive them)."""
+    return reporting.list_surveys(db)
 
 
 @app.get("/api/surveys/{survey_id}/summary")
 def survey_summary(survey_id: int, db: Session = Depends(get_session)):
-    """TODO: the weekly summary. See section A3 of the brief."""
-    return {"survey_id": survey_id, "weeks": []}
+    """Weekly summary, Saturday-Friday weeks. Rules are in reporting.SUMMARY_SQL."""
+    summary = reporting.survey_summary(db, survey_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail=f"survey {survey_id} not found")
+    return summary
