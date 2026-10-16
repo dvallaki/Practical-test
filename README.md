@@ -4,11 +4,13 @@
 
 ```
 docker compose up --build
-docker compose exec backend python -m app.models    # creates the tables (idempotent, create_all)
-docker compose exec backend python -m app.ingest    # also creates the tables; safe to re-run
+docker compose exec backend python -m app.ingest    # creates the tables, loads both CSVs; safe to re-run
+docker compose exec backend pytest                  # test_summary.py skips until the ingest has run
 ```
 
-`rejects.csv` is written to [backend/rejects.csv](backend/rejects.csv) (`/data` is mounted read-only; `backend/` is the writable mount).
+- No migration tool: tables are created with `create_all()` (also runnable alone: `python -m app.models`).
+- `rejects.csv` is written to [backend/rejects.csv](backend/rejects.csv), because `/data` is mounted read-only.
+- If something else on your machine already holds port 5432 or 8000, `db`/`backend` silently fail to start and the page shows `GET /api/surveys -> 500`. I hit this; free the ports.
 
 ## 2. Data model
 
@@ -62,7 +64,7 @@ Things I deliberately left **out of the schema** and kept in the ingest: "start 
 ### Timestamps and timezones
 
 - `started_at`, `completed_at` are **`timestamptz`**: absolute instants, stored as UTC. The ingest interprets the export's naive `DD/MM/YYYY HH:MM:SS` as `Asia/Kolkata` and converts. When the Dubai customer arrives, their rows are interpreted as `Asia/Dubai` and stored the same way. No column changes and no re-migration.
-- `client.timezone` (IANA name, default `Asia/Kolkata`) is the zone a client's reporting week (Saturday to Friday) is cut in. "Saturday" is a local-calendar concept. Cutting Dubai's weeks in Kolkata time would put the boundary at 22:30 Dubai time. The report does `date_trunc` on `started_at AT TIME ZONE client.timezone`.
+- `client.timezone` (IANA name, default `Asia/Kolkata`) is the zone a client's reporting week (Saturday to Friday) is cut in. "Saturday" is a local-calendar concept. Cutting Dubai's weeks in Kolkata time would put the boundary at 22:30 Dubai time. The report takes the local date (`started_at AT TIME ZONE client.timezone`) and steps back to the previous Saturday.
 - `survey.created_date` is a `date`: it's a calendar date in the export, not an instant.
 
 ### Indexes
@@ -129,8 +131,8 @@ How it handles the rules:
 - **Empty markers**, shared by all three functions and found by reading the file: `''` / whitespace, `N/A`, `n/a`, `NULL`, `null`, `-`, `none`, compared case-insensitively.
 - **`parse_client_datetime`** accepts exactly `%d/%m/%Y %H:%M:%S` and attaches `Asia/Kolkata`. Impossible dates (`29/02/2023`), other formats (ISO, date-only, an explicit offset) and non-ASCII digits raise `ValueError`. No guessing, and no month/day swapping.
 - **`normalise_email`**: canonical = `strip()` + lower-case the whole address, then a shape check (one `@`, no whitespace, dotted domain). Lower-casing the local part is technically not RFC-safe, but no real mail provider treats case as significant, and the data shows the same person in different cases across the three systems (`Priya.Sharma22@` vs `priya.sharma22@`). I deliberately *don't* strip dots or `+tags`. That's Gmail-specific and would merge distinct people on other domains.
-- **Tests:** [backend/tests/test_normalize.py](backend/tests/test_normalize.py) runs the cases above, plus every distinct value of each column in `responses.csv` through its parser. The only failure mode is `ValueError`, and the only values that fail are the known bad rows.
 - **`parse_duration_seconds`** accepts integers, thousands separators (`2,460` → 2460; the row's timestamps are 41 minutes apart, confirming it), and decimals (rounded half-up). It returns negatives as-is: `-2400` *is* a number. Rejecting it is a business rule, so the ingest does it.
+- **Tests:** [backend/tests/test_normalize.py](backend/tests/test_normalize.py) runs the cases above, plus every distinct value of each column in `responses.csv` through its parser. The only failure mode is `ValueError`, and the only values that fail are the known bad rows.
 
 ## 4. What I found wrong in the brief
 
@@ -177,8 +179,72 @@ The two emails only conflict if the audit table holds the *responses themselves*
 
 ## 7. AI log
 
-TODO
+**Tool:** Claude Code (Claude Opus) in the terminal, for every step. **About 95% of the final code and README text came from it.** My part was setting direction, reading every diff and output, and making the calls in section 4. Nothing was accepted on the strength of "it ran". Each step was checked against the data or the running system: idempotency via `xmin` and sequence values, the summary against an independent Python recomputation, and the page via a scripted click-through of all 12 surveys.
+
+**Not accepted #1: the bulk load (Step 2).** The first ingest upserted through SQLAlchemy's executemany:
+
+```python
+# before: version 1
+stmt = insert(Response)
+upsert = stmt.on_conflict_do_update(index_elements=["id"], set_=..., where=_changed(...))
+for i in range(0, len(rows), BATCH_SIZE):
+    db.execute(upsert, rows[i : i + BATCH_SIZE])
+```
+
+The run was still going after 5 minutes. `pg_stat_activity` showed one INSERT at a time, so the "batch" was really row by row. I killed it, and the single transaction rolled back to 0 rows. The tool's second attempt, one multi-row `insert(Response).values(batch)` per 2,000 rows, finished, but in 70–95 s. A cProfile run showed ~46 s of that was SQLAlchemy compiling bind parameters. I didn't accept either version. The final one copies valid rows into a temp table and upserts with set-based SQL:
+
+```python
+# after
+with cur.copy(f"COPY stage_response ({', '.join(STAGE_COLS)}) FROM STDIN") as copy:
+    for r in rows:
+        copy.write_row([r[c] for c in STAGE_COLS])
+# then: INSERT INTO respondent (email) SELECT DISTINCT ... WHERE NOT EXISTS (...)
+# and:  INSERT INTO response (...) SELECT ... FROM stage_response JOIN respondent ...
+#       ON CONFLICT (id) DO UPDATE SET ... WHERE (...) IS DISTINCT FROM (...)
+```
+
+17–34 s end to end, most of it container start-up. And a re-run still writes nothing.
+
+**Not accepted #2: rounding in the API (Step 5).** Before: `"completion_rate": round(row.responses_completed / invitations, 4) if invitations else None`. Rounding to 4 dp turns 1 completion out of 15,400 invitations into exactly 0.0001, so small weekly rates lose their precision before they reach the page. After: `row.responses_completed / invitations if invitations else None`, with the page doing `(rate * 100).toFixed(2) + "%"`. Display rounding belongs to the display, and the test now compares the exact value.
+
+**Faster than alone: profiling the CSV (Step 1).** In a few minutes of scripted profiling it surfaced:
+- the planted edge-case rows (`9000xx`)
+- the 578 (survey, email) pairs with repeat attempts, which turned "counts once" into a schema decision (`is_counted` plus a partial unique index)
+- the 3,265 responses dated before their survey was created
+- that 23% of responses fall on a different weekday in UTC than in Kolkata
+
+By hand in 38k rows, that would have eaten most of the two hours, and I'd have designed the schema before knowing any of it.
 
 ## 8. Where the two hours went
 
-TODO
+**It took about 3 hours, not 2.** I started around 12:00, and the last commit is 15:05. When I hit the two-hour mark during Step 5, I chose to finish all six steps rather than stop and list the rest. In hindsight, the brief says that's the worse answer: I should have stopped and written down what was left.
+
+| Step | Brief's guide | Actual (from commits) |
+|---|---|---|
+| 1. Data model | 20 min | ~23 min |
+| 2. Ingest (+ normalize.py bodies, which it needs) | 30 min | ~47 min |
+| 3. normalize.py tests | 15 min | ~21 min |
+| 4. Report endpoint | 20 min | ~21 min |
+| 5. The page | 15 min | **~60 min** |
+| 6a + 6b | 20 min | ~13 min |
+
+**What took longer than planned:**
+- **Step 5, by 45 minutes.** The component itself was quick. The time went on two things: working out why the page showed `GET /api/surveys -> 500` (another local project held ports 5432 and 8000, so this stack's db and backend never started), and getting a headless browser running for the click-through (the local Chromium was missing system libraries, so I used the Playwright Docker image).
+- **Step 2, by ~17 minutes:** the slow bulk load in section 7.
+- **The README length is not extra hours.** The AI drafted each section as its step finished, from output I'd just checked. That's why it's long and why it didn't cost proportionally more time. With more time I'd cut it, except section 2, which carries the most marks.
+
+**Left out:**
+- unit tests for the ingest's business rules (today they're verified only by running against the real file)
+- front-end tests
+- an Alembic migration (`create_all()` only)
+- deleting rows that disappear from the export
+- the delete itself (design only, per the brief)
+
+**Next two hours, in priority order:**
+1. Get the section 4 questions answered by the client, especially `responses_started` and `created_date`. They can change numbers on the screen.
+2. Unit tests for each reject reason, the counted-attempt pick, and "a changed row is updated on re-run".
+3. Handle rows that disappear from the export: today a re-run never deletes, so a response removed upstream stays in the report forever.
+4. An Alembic migration in place of `create_all()`.
+5. Survey delete, as designed in section 6.
+
+**Least happy with:** "started_at is in the future" is judged against the clock at run time, so the ingest depends on when you run it: run the same file in 2028 and row `900018` loads. A fixed cutoff, such as the export's own date, would make it deterministic.
